@@ -35,7 +35,7 @@ This installs dependencies, then runs everything end to end:
 chud_thai_package/
 ├── run_all.sh                 <- run this
 ├── requirements.txt
-├── images/                    <- the 18 source photos (1.jpg … 18.jpg)
+├── images/
 ├── scripts/
 │   ├── ibr_pipeline.py
 │   ├── build_360_viewer.py

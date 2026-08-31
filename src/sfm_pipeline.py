@@ -1,23 +1,14 @@
 """
 Chud Thai (Thai Chakraphat) -- 3D Reconstruction Pipeline
 =========================================================
+Adapted to process multiple garment datasets dynamically from 
+directional subfolders (Front -> Right -> Back -> Left).
+
 Museum Images -> Selection -> Pre-processing -> Alignment ->
 Feature Detection & Matching -> Motion Estimation ->
 Camera/Viewpoint Estimation -> 3D Reconstruction ->
 Texture Mapping -> 3D Rendering -> Visual Evaluation ->
 Final Digital Chud Thai Model
-
-Honest scope note (read this before trusting the output):
-  These are 18 handheld phone photos of a museum piece behind glass,
-  taken from roughly-but-not-evenly spaced angles, no calibration
-  target, no EXIF focal length, and with glare/reflections in several
-  frames. That is a genuinely hard case for classical Structure-from-
-  Motion (SfM). This script implements every stage for real using
-  OpenCV + Open3D and will produce a real (if sparse and noisy) 3D
-  point cloud -- it is NOT a substitute for a proper photogrammetry
-  tool (COLMAP / RealityCapture / Metashape) run on a clean, evenly
-  spaced turntable capture, which is what you'd want for a museum-
-  grade "Final Digital Chud Thai Model".
 """
 
 import cv2
@@ -25,31 +16,45 @@ import numpy as np
 import open3d as o3d
 import os
 import json
-
-SRC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "images")
-OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "outputs", "sfm_out")
-os.makedirs(OUT_DIR, exist_ok=True)
-
-NUM_IMAGES = 2
-
+import glob
 
 # ---------------------------------------------------------------------
 # 1. IMAGE COLLECTION & SELECTION
 # ---------------------------------------------------------------------
-def collect_and_select_images():
+def collect_and_select_images(garment_dir):
     kept = []
     rejected = []
-    for i in range(1, NUM_IMAGES + 1):
-        path = os.path.join(SRC_DIR, f"{i}.jpg")
-        img = cv2.imread(path)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
-        if sharpness > 15:
-            kept.append((i, img))
-        else:
-            rejected.append((i, sharpness))
-    print(f"[1] Selection: kept {len(kept)}/{NUM_IMAGES} images "
-          f"(rejected: {rejected})")
+    rotation_order = ["Front", "Right", "Back", "Left"]
+    
+    total_found = 0
+    
+    for angle in rotation_order:
+        angle_dir = os.path.join(garment_dir, angle)
+        if not os.path.exists(angle_dir):
+            continue
+            
+        files = sorted(
+            glob.glob(os.path.join(angle_dir, "*.jpg")),
+            key=lambda p: int(os.path.splitext(os.path.basename(p))[0])
+            if os.path.splitext(os.path.basename(p))[0].isdigit() else 0
+        )
+        
+        for f in files:
+            total_found += 1
+            img = cv2.imread(f)
+            if img is None:
+                continue
+                
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
+            
+            if sharpness > 15:
+                kept.append(img)
+            else:
+                rejected.append((os.path.basename(f), sharpness))
+                
+    print(f"[1] Selection: kept {len(kept)}/{total_found} images "
+          f"(rejected {len(rejected)})")
     return kept
 
 
@@ -260,16 +265,37 @@ def reconstruct_3d(images, keypoints, pair_matches, K, poses,
 # 8. TEXTURE MAPPING (surface reconstruction + vertex color)
 # ---------------------------------------------------------------------
 def texture_map(points, colors):
+    print("[8] Starting texture mapping phase...")
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(points)
     pcd.colors = o3d.utility.Vector3dVector(colors)
 
+    if len(pcd.points) < 50:
+        print("[8] Cloud too small for outlier removal. Skipping mesh.")
+        return pcd, None
+
+    print("[8] Removing statistical outliers...")
     pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
-    pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(
-        radius=0.5, max_nn=30))
-    pcd.orient_normals_consistent_tangent_plane(30)
+
+    if len(pcd.points) < 50:
+        print("[8] Cloud too small after outlier removal. Skipping mesh.")
+        return pcd, None
+
+    print("[8] Estimating normals...")
+    try:
+        pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(
+            radius=0.5, max_nn=30))
+        pcd.orient_normals_consistent_tangent_plane(30)
+    except Exception as e:
+        print(f"[8] Normal estimation failed ({e}). Skipping mesh.")
+        return pcd, None
 
     mesh = None
+    if len(pcd.points) < 1500:
+        print(f"[8] Only {len(pcd.points)} points. Too sparse for Poisson mesh (causes segfaults). Skipping.")
+        return pcd, None
+
+    print("[8] Generating Poisson mesh...")
     try:
         mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
             pcd, depth=8)
@@ -277,11 +303,9 @@ def texture_map(points, colors):
         thresh = np.quantile(densities, 0.15)
         keep = densities > thresh
         mesh.remove_vertices_by_mask(~keep)
-        print(f"[8] Poisson mesh: {len(mesh.vertices)} verts, "
-              f"{len(mesh.triangles)} tris after low-density trim")
+        print(f"[8] Poisson mesh success: {len(mesh.vertices)} verts, {len(mesh.triangles)} tris")
     except Exception as e:
-        print(f"[8] Poisson reconstruction failed ({e}); "
-              f"falling back to colored point cloud only")
+        print(f"[8] Poisson reconstruction failed ({e}); falling back to point cloud.")
 
     return pcd, mesh
 
@@ -338,21 +362,66 @@ def evaluate(keypoints, pair_matches, points, mesh, out_dir):
 
 
 # ---------------------------------------------------------------------
-# PIPELINE ENTRY POINT
+# PIPELINE ENTRY POINT (Batch Processing)
 # ---------------------------------------------------------------------
 if __name__ == "__main__":
-    selected = collect_and_select_images()
-    raw_images = [img for _, img in selected]
-    images = [preprocess(img) for img in raw_images]
-    coarse_align_preview(images)
-    keypoints, descriptors, pair_matches = detect_and_match_features(images)
-    motions = estimate_motion(keypoints, pair_matches, images[0].shape)
-    K, poses, relative_poses = estimate_camera_poses(
-        keypoints, pair_matches, images[0].shape)
-    points, colors = reconstruct_3d(
-        images, keypoints, pair_matches, K, poses, relative_poses)
-    pcd, mesh = texture_map(points, colors)
-    render_paths = render_3d(pcd, mesh, OUT_DIR)
-    report = evaluate(keypoints, pair_matches, points, mesh, OUT_DIR)
+    SRC_BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "images")
+    OUT_BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "outputs", "sfm_out")
 
-    print("\nDone. Outputs in", OUT_DIR)
+    if not os.path.exists(SRC_BASE):
+        raise FileNotFoundError(f"Source directory not found: {SRC_BASE}")
+
+    garments = [d for d in os.listdir(SRC_BASE) if os.path.isdir(os.path.join(SRC_BASE, d))]
+
+    if not garments:
+        print("No garment directories found in images/. Exiting.")
+        exit(0)
+
+    for garment in garments:
+        print(f"\n{'='*50}")
+        print(f"STARTING 3D RECONSTRUCTION (SfM): {garment}")
+        print(f"{'='*50}")
+        
+        garment_dir = os.path.join(SRC_BASE, garment)
+        garment_out_dir = os.path.join(OUT_BASE, garment)
+        os.makedirs(garment_out_dir, exist_ok=True)
+
+        raw_images = collect_and_select_images(garment_dir)
+        
+        if len(raw_images) < 2:
+            print(f"Skipping {garment}: Needs at least 2 sharp images for SfM reconstruction.")
+            continue
+
+        images = [preprocess(img) for img in raw_images]
+        coarse_align_preview(images)
+        keypoints, descriptors, pair_matches = detect_and_match_features(images)
+        motions = estimate_motion(keypoints, pair_matches, images[0].shape)
+        K, poses, relative_poses = estimate_camera_poses(keypoints, pair_matches, images[0].shape)
+        
+        try:
+            points, colors = reconstruct_3d(images, keypoints, pair_matches, K, poses, relative_poses)
+            
+            # --- CRITICAL FIX: Clean data to prevent C++ Segfaults ---
+            valid_mask = np.isfinite(points).all(axis=1) & np.isfinite(colors).all(axis=1)
+            points = np.ascontiguousarray(points[valid_mask], dtype=np.float64)
+            colors = np.ascontiguousarray(colors[valid_mask], dtype=np.float64)
+            
+            if len(points) < 10:
+                print(f"Skipping {garment}: Cloud is completely empty after cleaning.")
+                continue
+            # ---------------------------------------------------------
+
+            pcd, mesh = texture_map(points, colors)
+            
+            # --- CRITICAL FIX: Save files manually (no visualizer) ---
+            o3d.io.write_point_cloud(os.path.join(garment_out_dir, "sparse_cloud.ply"), pcd)
+            if mesh is not None:
+                o3d.io.write_triangle_mesh(os.path.join(garment_out_dir, "mesh.ply"), mesh)
+            print(f"[9] Saved 3D model files directly to disk (Visualizer skipped)")
+            # ---------------------------------------------------------
+
+            report = evaluate(keypoints, pair_matches, points, mesh, garment_out_dir)
+            print(f"\nSuccessfully finished {garment}. Outputs in {garment_out_dir}")
+            
+        except RuntimeError as e:
+            print(f"Failed to reconstruct {garment}: {e}")
