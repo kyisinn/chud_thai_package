@@ -26,22 +26,22 @@ fi
 echo ""
 echo "[1/4] Running Image-Based Rendering pipeline"
 echo "      (light field grid, depth-based rendering, view interpolation)..."
-python3 scripts/ibr_pipeline.py
+python3 src/ibr_pipeline.py
 
 echo ""
 echo "[2/4] Building the 360-degree HTML viewer from the smoothed frames..."
-python3 scripts/build_360_viewer.py
+python3 src/build_360_viewer.py
 
 echo ""
 echo "[3/4] Running the Structure-from-Motion 3D reconstruction pipeline"
 echo "      (feature matching -> pose estimation -> triangulation -> mesh)..."
 if command -v xvfb-run >/dev/null 2>&1; then
-    xvfb-run -a python3 scripts/sfm_pipeline.py
+    xvfb-run -a python3 src/sfm_pipeline.py
 else
     echo "      (xvfb-run not found; attempting direct run -- offscreen"
     echo "       preview renders may be skipped, but sparse_cloud.ply /"
     echo "       mesh.ply will still be written)"
-    python3 scripts/sfm_pipeline.py
+    python3 src/sfm_pipeline.py
 fi
 
 echo ""
