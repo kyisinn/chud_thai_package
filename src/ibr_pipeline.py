@@ -1,10 +1,9 @@
 """
 Chapter 14 - Image-Based Rendering
-Applied to a real 18-photo capture of the "Thai Chakraphat" dress
-(Queen Sirikit Museum of Textiles) instead of the book's synthetic squares.
+Adapted to process multiple real garment photo captures dynamically.
 
 Techniques used, straight from the chapter, adapted to real images:
-  1. Light Field Visualization  -> grid mosaic of the 18 real viewpoints
+  1. Light Field Visualization  -> grid mosaic of the real viewpoints
   2. Depth Image-Based Rendering -> synthesize an in-between viewpoint
      from one real photo + an estimated depth map
   3. View Interpolation          -> morph between two real adjacent
@@ -14,34 +13,45 @@ Techniques used, straight from the chapter, adapted to real images:
 import cv2
 import numpy as np
 import os
+import glob
 
-SRC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "images")
-OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "outputs", "ibr_out")
-os.makedirs(OUT_DIR, exist_ok=True)
+# ---------------------------------------------------------------------
+# CORE PIPELINE FUNCTIONS
+# ---------------------------------------------------------------------
 
-NUM_FRAMES = 18
-
-
-def load_frames():
-    """Load the 18 real photos in numeric order (1.jpg ... 18.jpg)."""
+def load_frames(garment_dir):
+    """
+    Loads real photos dynamically from the directional subfolders 
+    in the correct 360-degree rotation order.
+    """
+    rotation_order = ["Front", "Right", "Back", "Left"]
     frames = []
-    for i in range(1, NUM_FRAMES + 1):
-        path = os.path.join(SRC_DIR, f"{i}.jpg")
-        img = cv2.imread(path)
-        if img is None:
-            raise FileNotFoundError(path)
-        frames.append(img)
+    
+    for angle in rotation_order:
+        angle_dir = os.path.join(garment_dir, angle)
+        if not os.path.exists(angle_dir):
+            continue
+            
+        # Load images sorted by their numerical filename
+        files = sorted(
+            glob.glob(os.path.join(angle_dir, "*.jpg")),
+            key=lambda p: int(os.path.splitext(os.path.basename(p))[0])
+            if os.path.splitext(os.path.basename(p))[0].isdigit() else 0
+        )
+        
+        for f in files:
+            img = cv2.imread(f)
+            if img is not None:
+                frames.append(img)
+            else:
+                print(f"Warning: Could not read {f}")
+                
     return frames
 
 
-# ---------------------------------------------------------------------
-# 1. LIGHT FIELD VISUALIZATION (book's create_light_field, real images)
-# ---------------------------------------------------------------------
 def create_light_field_grid(frames, cols=6, thumb_size=(220, 293)):
     """
-    Book version simulated a (u, v) camera grid by warping ONE synthetic
-    square. Here the 18 real photos already ARE 18 real camera positions
-    around the object, so we lay them out on a grid exactly like the
+    Lays out the real camera positions on a grid exactly like the
     book's `full_field = np.vstack(light_field)` step.
     """
     rows = int(np.ceil(len(frames) / cols))
@@ -59,13 +69,10 @@ def create_light_field_grid(frames, cols=6, thumb_size=(220, 293)):
     return full_field
 
 
-# ---------------------------------------------------------------------
-# 2. DEPTH IMAGE-BASED RENDERING (book's render_with_depth, unchanged)
-# ---------------------------------------------------------------------
 def render_with_depth(color_img, depth_img, shift_amount, baseline):
     """
     Renders a new viewpoint from a color image and its depth map.
-    Uses a simple 3D warping approximation.  (identical to the book code)
+    Uses a simple 3D warping approximation. (identical to the book code)
     """
     h, w = color_img.shape[:2]
     if depth_img.max() > 1:
@@ -90,12 +97,8 @@ def render_with_depth(color_img, depth_img, shift_amount, baseline):
 
 def estimate_pseudo_depth(color_img):
     """
-    We don't have a LiDAR/stereo depth sensor for these museum photos,
-    so we estimate a plausible depth map the same way many DIBR demos
-    bootstrap one: the dress (bright, high-saturation gold silk) sits
-    close to camera, the dark ribbed wall sits far away. We use a
-    saturation + brightness heuristic and invert it (close = dark value
-    in the depth map, matching the book's convention where 0 = close).
+    Estimates a plausible depth map using a saturation + brightness heuristic 
+    and inverting it (close = dark value in the depth map, matching the book).
     """
     hsv = cv2.cvtColor(color_img, cv2.COLOR_BGR2HSV).astype(np.float32)
     sat = hsv[:, :, 1]
@@ -107,17 +110,14 @@ def estimate_pseudo_depth(color_img):
     return depth_img
 
 
-# ---------------------------------------------------------------------
-# 3. VIEW INTERPOLATION (book's view_interpolation, unchanged)
-# ---------------------------------------------------------------------
 def view_interpolation(img1, img2, alpha):
     """
     Linearly interpolates between two images.
-    alpha: 0.0 returns img1, 1.0 returns img2.   (identical to the book code)
+    alpha: 0.0 returns img1, 1.0 returns img2. (identical to the book code)
     """
-    if img1.shape != img2.shape:
-        print("Images must have the same dimensions.")
-        return None
+    if img1.shape[:2] != img2.shape[:2]:
+        img2 = cv2.resize(img2, (img1.shape[1], img1.shape[0]))
+        
     img1_f = img1.astype(np.float32)
     img2_f = img2.astype(np.float32)
     interpolated = (1 - alpha) * img1_f + alpha * img2_f
@@ -125,12 +125,10 @@ def view_interpolation(img1, img2, alpha):
     return interpolated
 
 
-def build_interpolated_rotation(frames, steps_between=2):
+def build_interpolated_rotation(frames, steps_between=5):
     """
     Uses view_interpolation() to insert `steps_between` synthetic
-    in-between frames between every pair of real adjacent photos,
-    turning 18 real frames into a much smoother rotation sequence
-    for the final 360 viewer.
+    in-between frames between every pair of real adjacent photos.
     """
     h, w = frames[0].shape[:2]
     resized = [cv2.resize(f, (w, h)) for f in frames]
@@ -148,44 +146,81 @@ def build_interpolated_rotation(frames, steps_between=2):
     return sequence
 
 
+# ---------------------------------------------------------------------
+# MAIN BATCH PROCESSING EXECUTION
+# ---------------------------------------------------------------------
 if __name__ == "__main__":
-    frames = load_frames()
+    SRC_BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "images")
+    OUT_BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "outputs", "ibr_out")
 
-    # --- 1. Light field grid ---
-    lf_grid = create_light_field_grid(frames)
-    cv2.imwrite(os.path.join(OUT_DIR, "light_field_grid.jpg"), lf_grid,
-                [cv2.IMWRITE_JPEG_QUALITY, 85])
-    print("Saved light_field_grid.jpg", lf_grid.shape)
+    if not os.path.exists(SRC_BASE):
+        raise FileNotFoundError(f"Source directory not found: {SRC_BASE}")
 
-    # --- 2. Depth-based rendering on one real photo ---
-    base = frames[0]
-    depth = estimate_pseudo_depth(base)
-    cv2.imwrite(os.path.join(OUT_DIR, "depth_map.jpg"), depth)
+    # Identify garment subdirectories (e.g., 'Blue Dress')
+    garments = [d for d in os.listdir(SRC_BASE) if os.path.isdir(os.path.join(SRC_BASE, d))]
 
-    synth_left = render_with_depth(base, depth, shift_amount=-0.6, baseline=2.0)
-    synth_right = render_with_depth(base, depth, shift_amount=0.6, baseline=2.0)
-    cv2.imwrite(os.path.join(OUT_DIR, "depth_rendered_left.jpg"), synth_left,
-                [cv2.IMWRITE_JPEG_QUALITY, 85])
-    cv2.imwrite(os.path.join(OUT_DIR, "depth_rendered_right.jpg"), synth_right,
-                [cv2.IMWRITE_JPEG_QUALITY, 85])
-    print("Saved depth_map.jpg + depth_rendered_left/right.jpg")
+    if not garments:
+        print("No garment directories found in images/. Exiting.")
+        exit(0)
 
-    # --- 3. View interpolation strip (between frame 5 and frame 6) ---
-    img_a, img_b = frames[4], frames[5]
-    img_b_resized = cv2.resize(img_b, (img_a.shape[1], img_a.shape[0]))
-    strip_imgs = [view_interpolation(img_a, img_b_resized, a)
-                  for a in [0.0, 0.25, 0.5, 0.75, 1.0]]
-    strip_thumbs = [cv2.resize(im, (160, 213)) for im in strip_imgs]
-    strip = np.hstack(strip_thumbs)
-    cv2.imwrite(os.path.join(OUT_DIR, "view_interpolation_strip.jpg"), strip,
-                [cv2.IMWRITE_JPEG_QUALITY, 85])
-    print("Saved view_interpolation_strip.jpg", strip.shape)
+    for garment in garments:
+        print(f"\n{'='*40}")
+        print(f"PROCESSING GARMENT: {garment}")
+        print(f"{'='*40}")
+        
+        garment_dir = os.path.join(SRC_BASE, garment)
+        garment_out_dir = os.path.join(OUT_BASE, garment)
+        os.makedirs(garment_out_dir, exist_ok=True)
 
-    # --- Build the full smoothed rotation sequence for the 360 viewer ---
-    smooth_sequence = build_interpolated_rotation(frames, steps_between=2)
-    seq_dir = os.path.join(OUT_DIR, "smooth_sequence")
-    os.makedirs(seq_dir, exist_ok=True)
-    for i, im in enumerate(smooth_sequence):
-        cv2.imwrite(os.path.join(seq_dir, f"{i:03d}.jpg"), im,
-                    [cv2.IMWRITE_JPEG_QUALITY, 78])
-    print(f"Saved {len(smooth_sequence)} smoothed rotation frames to {seq_dir}")
+        frames = load_frames(garment_dir)
+        
+        if not frames:
+            print(f"No frames found for {garment}. Skipping...")
+            continue
+            
+        print(f"Loaded {len(frames)} total raw frames.")
+
+        # --- 1. Light field grid ---
+        lf_grid = create_light_field_grid(frames)
+        grid_path = os.path.join(garment_out_dir, "light_field_grid.jpg")
+        cv2.imwrite(grid_path, lf_grid, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        print(f"Saved light_field_grid.jpg {lf_grid.shape}")
+
+        # --- 2. Depth-based rendering on one real photo ---
+        base = frames[0]
+        depth = estimate_pseudo_depth(base)
+        cv2.imwrite(os.path.join(garment_out_dir, "depth_map.jpg"), depth)
+
+        synth_left = render_with_depth(base, depth, shift_amount=-0.6, baseline=2.0)
+        synth_right = render_with_depth(base, depth, shift_amount=0.6, baseline=2.0)
+        cv2.imwrite(os.path.join(garment_out_dir, "depth_rendered_left.jpg"), synth_left,
+                    [cv2.IMWRITE_JPEG_QUALITY, 85])
+        cv2.imwrite(os.path.join(garment_out_dir, "depth_rendered_right.jpg"), synth_right,
+                    [cv2.IMWRITE_JPEG_QUALITY, 85])
+        print("Saved depth_map.jpg + depth_rendered_left/right.jpg")
+
+        # --- 3. View interpolation strip ---
+        # Safety check: if dataset is small, use frames 0 and 1. Otherwise use 4 and 5.
+        idx_a = 4 if len(frames) > 5 else 0
+        idx_b = 5 if len(frames) > 5 else 1
+        
+        img_a, img_b = frames[idx_a], frames[idx_b]
+        img_b_resized = cv2.resize(img_b, (img_a.shape[1], img_a.shape[0]))
+        strip_imgs = [view_interpolation(img_a, img_b_resized, a)
+                      for a in [0.0, 0.25, 0.5, 0.75, 1.0]]
+        strip_thumbs = [cv2.resize(im, (160, 213)) for im in strip_imgs]
+        strip = np.hstack(strip_thumbs)
+        
+        cv2.imwrite(os.path.join(garment_out_dir, "view_interpolation_strip.jpg"), strip,
+                    [cv2.IMWRITE_JPEG_QUALITY, 85])
+        print(f"Saved view_interpolation_strip.jpg (between frame {idx_a} and {idx_b})")
+
+        # --- Build the full smoothed rotation sequence for the 360 viewer ---
+        smooth_sequence = build_interpolated_rotation(frames, steps_between=2)
+        seq_dir = os.path.join(garment_out_dir, "smooth_sequence")
+        os.makedirs(seq_dir, exist_ok=True)
+        
+        for i, im in enumerate(smooth_sequence):
+            cv2.imwrite(os.path.join(seq_dir, f"{i:03d}.jpg"), im,
+                        [cv2.IMWRITE_JPEG_QUALITY, 78])
+        print(f"Saved {len(smooth_sequence)} smoothed rotation frames to {seq_dir}")
