@@ -330,7 +330,7 @@ middle_view = view_interpolation(img1, img2, alpha)
 
  
 
-cv2.imshow('View 1', img1) 
+cv2.imshow('View 1', img) 
 
 cv2.imshow('View 2', img2) 
 
