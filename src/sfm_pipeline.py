@@ -30,7 +30,7 @@ SRC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "images
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "outputs", "sfm_out")
 os.makedirs(OUT_DIR, exist_ok=True)
 
-NUM_IMAGES = 18
+NUM_IMAGES = 2
 
 
 # ---------------------------------------------------------------------
