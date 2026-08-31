@@ -19,7 +19,8 @@ SRC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "images
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "outputs", "ibr_out")
 os.makedirs(OUT_DIR, exist_ok=True)
 
-NUM_FRAMES = 18
+NUM_FRAMES = 18  # number of real photos in the Thai Chakraphat dataset
+
 
 
 def load_frames():
